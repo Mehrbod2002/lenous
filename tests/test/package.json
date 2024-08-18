@@ -1,0 +1,30 @@
+{
+  "name": "test",
+  "version": "0.0.0",
+  "description": "",
+  "main": "lib/index",
+  "types": "lib/index.d.ts",
+  "scripts": {
+    "ui": "ui $@",
+    "start": "ui start $@",
+    "test": "ts test",
+    "tdd": "ts test --watch",
+    "lint": "ts lint",
+    "build": "ts build $@",
+    "build-test": "ts build --tsconfig=tsconfig.test $@",
+    "prepare": "ts prepare"
+  },
+  "dependencies": {
+    "@platform/react": "0.4.86"
+  },
+  "devDependencies": {
+    "@uiharness/dev": "0.10.6",
+    "@uiharness/ui": "0.7.6",
+    "electron": "31.4.0"
+  },
+  "files": [
+    "lib",
+    "!*.TEST.{js, mjs, d.ts}"
+  ],
+  "license": "MIT"
+}
