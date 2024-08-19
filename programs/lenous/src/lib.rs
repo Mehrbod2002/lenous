@@ -1,307 +1,308 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token::{self, Token};
-
-declare_id!("25TiYvDPHV63mG78NU9UAUmTcRaqB3DJ4rgiGZ34sHYC");
-
-#[derive(Accounts)]
-pub struct Deposit<'info> {
-    #[account(mut)]
-    pub user: Signer<'info>,
-    #[account(mut)]
-    /// CHECK: This account is a token account for USDT, and the program should ensure it's the correct account during initialization.
-    pub user_token_account: AccountInfo<'info>,
-    #[account(mut)]
-    /// CHECK: This account is a token account for USDT, and the program should ensure it's the correct account during initialization.
-    pub dex_token_account: AccountInfo<'info>,
-    #[account(mut)]
-    pub user_account: Account<'info, UserAccount>,
-    pub token_program: Program<'info, Token>,
-}
-
-#[derive(Accounts)]
-pub struct PlaceOrder<'info> {
-    #[account(init, payer = user, space = 8 + 32 + 32 + 32 + 8 + 8 + 1)]
-    /// CHECK: manual
-    pub order: AccountInfo<'info>,
-    #[account(mut)]
-    pub user: Signer<'info>,
-    #[account(mut)]
-    pub dex_account: Account<'info, DexAccount>,
-    #[account(mut)]
-    pub user_account: Account<'info, UserAccount>,
-    pub system_program: Program<'info, System>,
-}
-
-#[derive(Accounts)]
-pub struct ClosePosition<'info> {
-    #[account(mut)]
-    pub user: Signer<'info>,
-    #[account(mut)]
-    pub dex_account: Account<'info, DexAccount>,
-    #[account(mut)]
-    pub user_account: Account<'info, UserAccount>,
-    #[account(mut)]
-    /// CHECK: manual
-    pub position: AccountInfo<'info>,
-    pub system_program: Program<'info, System>,
-}
-
-#[derive(Accounts)]
-pub struct Withdraw<'info> {
-    #[account(mut)]
-    pub user: Signer<'info>,
-    #[account(mut)]
-    /// CHECK: This account is a token account for USDT, and the program should ensure it's the correct account during initialization.
-    pub user_token_account: AccountInfo<'info>,
-    #[account(mut)]
-    /// CHECK: This account is a token account for USDT, and the program should ensure it's the correct account during initialization.
-    pub dex_token_account: AccountInfo<'info>,
-    #[account(mut)]
-    pub user_account: Account<'info, UserAccount>,
-    pub token_program: Program<'info, Token>,
-}
-
-impl<'info> Deposit<'info> {
-    pub fn into_transfer_to_dex_context(
-        &self,
-    ) -> CpiContext<'_, '_, '_, 'info, token::Transfer<'info>> {
-        let cpi_accounts = token::Transfer {
-            from: self.user_token_account.to_account_info(),
-            to: self.dex_token_account.to_account_info(),
-            authority: self.user.to_account_info(),
-        };
-        CpiContext::new(self.token_program.to_account_info(), cpi_accounts)
-    }
-}
-
-impl<'info> Withdraw<'info> {
-    pub fn into_transfer_to_user_context(
-        &self,
-    ) -> CpiContext<'_, '_, '_, 'info, token::Transfer<'info>> {
-        let cpi_accounts = token::Transfer {
-            from: self.dex_token_account.to_account_info(),
-            to: self.user_token_account.to_account_info(),
-            authority: self.user_account.to_account_info(),
-        };
-        CpiContext::new(self.token_program.to_account_info(), cpi_accounts)
-    }
-}
-
-#[derive(Accounts)]
-pub struct GetDexTokenAccounts<'info> {
-    #[account()]
-    pub dex_account: Account<'info, DexAccount>,
-}
-
-#[account]
-pub struct DexAccount {
-    pub authority: Pubkey,
-    pub usdt_mint: Pubkey,
-    pub usdc_mint: Pubkey,
-    pub usdt_token_account: Pubkey,
-    pub usdc_token_account: Pubkey,
-    pub fee_rate: u64,
-    pub order_count: u64,
-}
-
-#[account]
-pub struct UserAccount {
-    pub user: Pubkey,
-    pub margin_balance_usdt: u64,
-    pub margin_balance_usdc: u64,
-    // pub open_positions: Vec<Position>, // Uncomment this if it's needed
-}
-
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, PartialEq, Eq)]
-pub struct Position {
-    pub id: u64,
-    pub user: Pubkey,
-    pub asset: String,
-    pub entry_price: u64,
-    pub leverage: u8,
-    pub size: u64,
-    pub is_long: bool,
-    pub status: PositionStatus,
-}
-
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, PartialEq, Eq)]
-pub enum PositionStatus {
-    Open,
-    Closed,
-}
-
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, PartialEq, Eq)]
-pub enum StablecoinType {
-    USDT,
-    USDC,
-}
-
-#[error_code]
-pub enum DexError {
-    #[msg("Insufficient funds for the transaction")]
-    InsufficientFunds,
-    #[msg("Order not found")]
-    OrderNotFound,
-    #[msg("Invalid token account")]
-    InvalidTokenAccount,
-    #[msg("Invalid leverage")]
-    InvalidLeverage,
-}
+use anchor_spl::token::{self, InitializeAccount, Mint, Token, TokenAccount, Transfer, ID};
 
 #[program]
-pub mod lenous {
+pub mod perpetual_dex {
     use super::*;
 
-    pub fn initialize(
-        ctx: Context<Initialize>,
-        usdt_mint: Pubkey,
-        usdc_mint: Pubkey,
-        fee_rate: u64,
-    ) -> Result<()> {
-        let dex_account = &mut ctx.accounts.dex_account;
-        dex_account.authority = ctx.accounts.admin.key();
-        dex_account.usdt_mint = usdt_mint;
-        dex_account.usdc_mint = usdc_mint;
-        dex_account.fee_rate = fee_rate;
-        dex_account.order_count = 0;
+    pub fn initialize_token_account(ctx: Context<InitializeTokenAccount>) -> Result<()> {
+        let cpi_ctx = CpiContext::new(
+            ctx.accounts.token_program.to_account_info(),
+            InitializeAccount {
+                account: ctx.accounts.token_account.to_account_info(),
+                mint: ctx.accounts.mint.to_account_info(),
+                authority: ctx.accounts.owner.to_account_info(),
+                rent: ctx.accounts.rent.to_account_info(),
+            },
+        );
+        token::initialize_account(cpi_ctx)?;
 
         Ok(())
     }
 
-    pub fn deposit(ctx: Context<Deposit>, amount: u64) -> Result<()> {
-        let cpi_ctx = ctx.accounts.into_transfer_to_dex_context();
+    pub fn deposit_tokens(ctx: Context<DepositTokens>, amount: u64) -> Result<()> {
+        let cpi_ctx = CpiContext::new(
+            ctx.accounts.token_program.to_account_info(),
+            Transfer {
+                from: ctx.accounts.user_token_account.to_account_info(),
+                to: ctx.accounts.dex_token_account.to_account_info(),
+                authority: ctx.accounts.user.to_account_info(),
+            },
+        );
         token::transfer(cpi_ctx, amount)?;
 
-        // let user_account = &mut ctx.accounts.user_account;
-        // match stablecoin {
-        //     StablecoinType::USDT => user_account.margin_balance_usdt += amount,
-        //     StablecoinType::USDC => user_account.margin_balance_usdc += amount,
-        // }
+        Ok(())
+    }
+
+    pub fn withdraw_tokens(ctx: Context<WithdrawTokens>, amount: u64) -> Result<()> {
+        let cpi_ctx = CpiContext::new(
+            ctx.accounts.token_program.to_account_info(),
+            Transfer {
+                from: ctx.accounts.dex_token_account.to_account_info(),
+                to: ctx.accounts.user_token_account.to_account_info(),
+                authority: ctx.accounts.dex.to_account_info(),
+            },
+        );
+        token::transfer(cpi_ctx, amount)?;
 
         Ok(())
     }
 
     pub fn place_order(
         ctx: Context<PlaceOrder>,
-        asset: String,
-        leverage: u8,
-        size: u64,
-        is_long: bool,
-        entry_price: u64,
+        asset: Pubkey,
+        position: PositionType,
+        price: u64,
+        margin: u64,
     ) -> Result<()> {
         let user_account = &mut ctx.accounts.user_account;
-        let dex_account = &mut ctx.accounts.dex_account;
 
-        let margin_required = size
-            .checked_div(leverage as u64)
-            .ok_or(DexError::InvalidLeverage)?;
+        let available_margin = user_account.usdt_balance + user_account.usdc_balance;
+        require!(available_margin >= margin, ErrorCode::InsufficientMargin);
 
-        require!(
-            user_account.margin_balance_usdt >= margin_required,
-            DexError::InsufficientFunds
-        );
+        if user_account.usdt_balance >= margin {
+            user_account.usdt_balance -= margin;
+        } else {
+            user_account.usdc_balance -= margin - user_account.usdt_balance;
+            user_account.usdt_balance = 0;
+        }
 
-        let position = Position {
-            id: dex_account.order_count,
-            user: ctx.accounts.user.key(),
+        let order = Order {
             asset,
-            entry_price,
-            leverage,
-            size,
-            is_long,
-            status: PositionStatus::Open,
+            position,
+            price,
+            margin_locked: margin,
+            settled: false,
+        };
+        user_account.open_positions.push(order);
+
+        Ok(())
+    }
+
+    pub fn settle_order(
+        ctx: Context<SettleOrder>,
+        asset_price: u64,
+        order_index: usize,
+    ) -> Result<()> {
+        let user_account = &mut ctx.accounts.user_account;
+
+        let order = &mut user_account.open_positions[order_index];
+        require!(!order.settled, ErrorCode::OrderAlreadySettled);
+
+        let result = match order.position {
+            PositionType::Long => asset_price > order.price,
+            PositionType::Short => asset_price < order.price,
         };
 
-        user_account.margin_balance_usdt = user_account
-            .margin_balance_usdt
-            .checked_sub(margin_required)
-            .ok_or(DexError::InsufficientFunds)?;
+        let amount = order.margin_locked;
 
-        // user_account.open_positions.push(position);
+        if result {
+            let cpi_ctx = CpiContext::new(
+                ctx.accounts.token_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.dex_account.to_account_info(),
+                    to: ctx.accounts.user_token_account.to_account_info(),
+                    authority: ctx.accounts.dex.to_account_info(),
+                },
+            );
+            token::transfer(cpi_ctx, amount)?;
+        } else {
+            let cpi_ctx = CpiContext::new(
+                ctx.accounts.token_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.user_token_account.to_account_info(),
+                    to: ctx.accounts.dex_account.to_account_info(),
+                    authority: ctx.accounts.user.to_account_info(),
+                },
+            );
+            token::transfer(cpi_ctx, amount)?;
+        }
+        order.settled = true;
 
-        dex_account.order_count += 1;
-
-        Ok(())
-    }
-
-    pub fn get_dex_token_accounts(ctx: Context<GetDexTokenAccounts>) -> Result<(Pubkey, Pubkey)> {
-        let dex_account = &ctx.accounts.dex_account;
-        Ok((
-            dex_account.usdt_token_account,
-            dex_account.usdc_token_account,
-        ))
-    }
-
-    pub fn close_position(ctx: Context<ClosePosition>, position_id: u64, price: u64) -> Result<()> {
-        //     let user_account = &mut ctx.accounts.user_account;
-
-        //     let position = user_account
-        //         .open_positions
-        //         .iter_mut()
-        //         .find(|p| p.id == position_id)
-        //         .ok_or(DexError::OrderNotFound)?;
-
-        //     let pnl = if position.is_long {
-        //         (price as i64 - position.entry_price as i64) * position.size as i64
-        //             / position.entry_price as i64
-        //     } else {
-        //         (position.entry_price as i64 - price as i64) * position.size as i64
-        //             / position.entry_price as i64
-        //     };
-
-        //     position.status = PositionStatus::Closed;
-
-        //     if pnl > 0 {
-        //         user_account.margin_balance_usdt += pnl as u64;
-        //     } else {
-        //         user_account.margin_balance_usdt = user_account
-        //             .margin_balance_usdt
-        //             .checked_sub((-pnl) as u64)
-        //             .ok_or(DexError::InsufficientFunds)?;
-        //     }
-
-        Ok(())
-    }
-
-    pub fn withdraw(ctx: Context<Withdraw>, amount: u64) -> Result<()> {
-        // let user_account = &mut ctx.accounts.user_account;
-
-        // match stablecoin {
-        //     StablecoinType::USDT => {
-        //         require!(
-        //             user_account.margin_balance_usdt >= amount,
-        //             DexError::InsufficientFunds
-        //         );
-        //         user_account.margin_balance_usdt -= amount;
-        //     }
-        //     StablecoinType::USDC => {
-        //         require!(
-        //             user_account.margin_balance_usdc >= amount,
-        //             DexError::InsufficientFunds
-        //         );
-        //         user_account.margin_balance_usdc -= amount;
-        //     }
-        // }
-
-        // Transfer tokens from the DEX account to the user's account
-        let cpi_ctx = ctx.accounts.into_transfer_to_user_context();
-        token::transfer(cpi_ctx, amount)?;
         Ok(())
     }
 }
 
 #[derive(Accounts)]
-#[instruction()]
-pub struct Initialize<'info> {
-    #[account(init, payer = admin, space = 8 + 32 + 32 + 8 + 8 + 32 + 32)]
-    pub dex_account: Account<'info, DexAccount>,
+pub struct DepositTokens<'info> {
     #[account(mut)]
-    pub admin: Signer<'info>,
-    #[account(mut)]
-    /// CHECK: This account is a token account for USDT, and the program should ensure it's the correct account during initialization.
-    pub usdt_token_account: AccountInfo<'info>,
-    /// CHECK: This account is a token account for USDT, and the program should ensure it's the correct account during initialization.
-    pub usdc_mint: AccountInfo<'info>,
+    pub user: Signer<'info>,
+
+    #[account(
+        mut,
+        constraint = user_token_account.owner == user.key()
+    )]
+    pub user_token_account: Account<'info, TokenAccount>,
+
+    #[account(
+        mut,
+        constraint = dex_token_account.owner == dex.key()
+    )]
+    pub dex_token_account: Account<'info, TokenAccount>,
+
+    #[account(address = token::ID)]
     pub token_program: Program<'info, Token>,
+
+    #[account(mut)]
+    pub dex: Signer<'info>,
+
+    #[account(address = USDT_MINT)]
+    pub usdt_mint: Account<'info, Mint>,
+
+    #[account(address = USDC_MINT)]
+    pub usdc_mint: Account<'info, Mint>,
+}
+
+#[derive(Accounts)]
+pub struct WithdrawTokens<'info> {
+    #[account(mut)]
+    pub dex: Signer<'info>,
+
+    #[account(
+        mut,
+        constraint = dex_token_account.owner == dex.key()
+    )]
+    pub dex_token_account: Account<'info, TokenAccount>,
+
+    #[account(
+        mut,
+        constraint = user_token_account.owner == user.key()
+    )]
+    pub user_token_account: Account<'info, TokenAccount>,
+
+    #[account(address = token::ID)]
+    pub token_program: Program<'info, Token>,
+
+    #[account(mut)]
+    pub user: Signer<'info>,
+
+    #[account(address = USDT_MINT)]
+    pub usdt_mint: Account<'info, Mint>,
+
+    #[account(address = USDC_MINT)]
+    pub usdc_mint: Account<'info, Mint>,
+}
+
+#[derive(Accounts)]
+pub struct PlaceOrder<'info> {
+    #[account(mut)]
+    pub user: Signer<'info>,
+
+    #[account(mut)]
+    pub user_account: Account<'info, UserAccount>,
+
+    #[account(
+        mut,
+        constraint = user_token_account.owner == user.key()
+    )]
+    pub user_token_account: Account<'info, TokenAccount>,
+
+    #[account(
+        mut,
+        constraint = dex_token_account.owner == dex.key()
+    )]
+    pub dex_token_account: Account<'info, TokenAccount>,
+
+    #[account(address = token::ID)]
+    pub token_program: Program<'info, Token>,
+
+    #[account(mut)]
+    pub dex: Signer<'info>,
+
+    #[account(address = USDT_MINT)]
+    pub usdt_mint: Account<'info, Mint>,
+
+    #[account(address = USDC_MINT)]
+    pub usdc_mint: Account<'info, Mint>,
+}
+
+#[derive(Accounts)]
+pub struct SettleOrder<'info> {
+    #[account(mut)]
+    pub user: Signer<'info>,
+
+    #[account(mut)]
+    pub user_account: Account<'info, UserAccount>,
+
+    #[account(
+        mut,
+        constraint = dex_account.owner == dex.key()
+    )]
+    pub dex_account: Account<'info, TokenAccount>,
+
+    #[account(
+        mut,
+        constraint = user_token_account.owner == user.key()
+    )]
+    pub user_token_account: Account<'info, TokenAccount>,
+
+    #[account(address = token::ID)]
+    pub token_program: Program<'info, Token>,
+
+    #[account(mut)]
+    pub dex: Signer<'info>,
+}
+
+#[account]
+pub struct UserAccount {
+    pub owner: Pubkey,
+    pub usdt_balance: u64,
+    pub usdc_balance: u64,
+    pub open_positions: Vec<Order>,
+}
+
+#[account]
+pub struct Order {
+    pub asset: Pubkey,
+    pub position: PositionType,
+    pub price: u64,
+    pub margin_locked: u64,
+    pub settled: bool,
+}
+
+#[derive(AnchorDeserialize, AnchorSerialize, PartialEq, Eq, Clone)]
+pub enum PositionType {
+    Long,
+    Short,
+}
+
+#[error_code]
+pub enum ErrorCode {
+    #[msg("Insufficient margin to place the order.")]
+    InsufficientMargin,
+
+    #[msg("Order has already been settled.")]
+    OrderAlreadySettled,
+
+    #[msg("The owner of the token account does not match the expected account.")]
+    IncorrectAccountOwner,
+
+    #[msg("Account validation failed.")]
+    AccountValidationFailed,
+
+    #[msg("An unexpected error occurred.")]
+    UnexpectedError,
+}
+
+#[derive(Accounts)]
+pub struct InitializeTokenAccount<'info> {
+    #[account(init, payer = owner, space = 8 + TokenAccount::LEN)]
+    pub token_account: Account<'info, TokenAccount>,
+    #[account(address = token::ID)]
+    pub token_program: Program<'info, Token>,
+    #[account(mut)]
+    pub mint: Account<'info, Mint>,
+    #[account(mut)]
+    pub owner: Signer<'info>,
+    pub rent: Sysvar<'info, Rent>,
     pub system_program: Program<'info, System>,
 }
+
+pub const USDT_MINT: Pubkey = Pubkey::new_from_array([
+    206, 1, 14, 96, 175, 237, 178, 39, 23, 189, 99, 25, 47, 84, 20, 90, 63, 150, 90, 51, 187, 130,
+    210, 199, 2, 158, 178, 206, 30, 32, 130, 100,
+]);
+pub const USDC_MINT: Pubkey = Pubkey::new_from_array([
+    198, 250, 122, 243, 190, 219, 173, 58, 61, 101, 243, 106, 171, 201, 116, 49, 177, 187, 228,
+    194, 210, 246, 224, 228, 124, 166, 2, 3, 69, 47, 93, 97,
+]);
