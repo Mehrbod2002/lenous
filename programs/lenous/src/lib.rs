@@ -1,11 +1,15 @@
 use anchor_lang::prelude::*;
-use anchor_spl::token::{self, InitializeAccount, Mint, Token, TokenAccount, Transfer, ID};
+use anchor_spl::token::{
+    self, InitializeAccount, Mint, Token, TokenAccount, Transfer, ID as TokenID,
+};
+
+declare_id!("Bims5KmWhFne1m1UT4bfSknBEoECeYfztoKrsR2jTnrA");
 
 #[program]
-pub mod perpetual_dex {
+pub mod lenous {
     use super::*;
 
-    pub fn initialize_token_account(ctx: Context<InitializeTokenAccount>) -> Result<()> {
+    pub fn initialize(ctx: Context<Initialize>) -> Result<()> {
         let cpi_ctx = CpiContext::new(
             ctx.accounts.token_program.to_account_info(),
             InitializeAccount {
@@ -52,26 +56,44 @@ pub mod perpetual_dex {
         ctx: Context<PlaceOrder>,
         asset: Pubkey,
         position: PositionType,
-        price: u64,
-        margin: u64,
+        order_type: OrderType,
+        price: Option<u64>,
+        amount: u64,
+        leverage: u64,
+        margin_type: MarginType,
+        stop_loss: Option<u64>,
+        take_profit: Option<u64>,
+        expiration_date: Option<i64>,
     ) -> Result<()> {
         let user_account = &mut ctx.accounts.user_account;
 
         let available_margin = user_account.usdt_balance + user_account.usdc_balance;
-        require!(available_margin >= margin, ErrorCode::InsufficientMargin);
+        require!(available_margin >= amount, ErrorCode::InsufficientMargin);
 
-        if user_account.usdt_balance >= margin {
-            user_account.usdt_balance -= margin;
+        let margin_locked = amount * leverage;
+        if user_account.usdt_balance >= margin_locked {
+            user_account.usdt_balance -= margin_locked;
         } else {
-            user_account.usdc_balance -= margin - user_account.usdt_balance;
+            user_account.usdc_balance -= margin_locked - user_account.usdt_balance;
             user_account.usdt_balance = 0;
         }
 
+        let order_id = user_account.next_order_id;
+        user_account.next_order_id += 1;
+
         let order = Order {
+            id: order_id,
             asset,
             position,
+            order_type,
             price,
-            margin_locked: margin,
+            amount,
+            leverage,
+            margin_type,
+            stop_loss,
+            take_profit,
+            expiration_date,
+            margin_locked,
             settled: false,
         };
         user_account.open_positions.push(order);
@@ -79,19 +101,22 @@ pub mod perpetual_dex {
         Ok(())
     }
 
-    pub fn settle_order(
-        ctx: Context<SettleOrder>,
-        asset_price: u64,
-        order_index: usize,
-    ) -> Result<()> {
+    pub fn settle_order(ctx: Context<SettleOrder>, asset_price: u64, order_id: u64) -> Result<()> {
         let user_account = &mut ctx.accounts.user_account;
+        let order = user_account
+            .open_positions
+            .iter_mut()
+            .find(|o| o.id == order_id)
+            .ok_or(ErrorCode::OrderNotFound)?;
 
-        let order = &mut user_account.open_positions[order_index];
         require!(!order.settled, ErrorCode::OrderAlreadySettled);
 
-        let result = match order.position {
-            PositionType::Long => asset_price > order.price,
-            PositionType::Short => asset_price < order.price,
+        let result = match order.order_type {
+            OrderType::Market => true,
+            OrderType::Limit => match order.position {
+                PositionType::Long => asset_price >= order.price.unwrap_or(u64::MAX),
+                PositionType::Short => asset_price <= order.price.unwrap_or(0),
+            },
         };
 
         let amount = order.margin_locked;
@@ -140,7 +165,7 @@ pub struct DepositTokens<'info> {
     )]
     pub dex_token_account: Account<'info, TokenAccount>,
 
-    #[account(address = token::ID)]
+    #[account(address = TokenID)]
     pub token_program: Program<'info, Token>,
 
     #[account(mut)]
@@ -170,7 +195,7 @@ pub struct WithdrawTokens<'info> {
     )]
     pub user_token_account: Account<'info, TokenAccount>,
 
-    #[account(address = token::ID)]
+    #[account(address = TokenID)]
     pub token_program: Program<'info, Token>,
 
     #[account(mut)]
@@ -203,7 +228,7 @@ pub struct PlaceOrder<'info> {
     )]
     pub dex_token_account: Account<'info, TokenAccount>,
 
-    #[account(address = token::ID)]
+    #[account(address = TokenID)]
     pub token_program: Program<'info, Token>,
 
     #[account(mut)]
@@ -236,7 +261,7 @@ pub struct SettleOrder<'info> {
     )]
     pub user_token_account: Account<'info, TokenAccount>,
 
-    #[account(address = token::ID)]
+    #[account(address = TokenID)]
     pub token_program: Program<'info, Token>,
 
     #[account(mut)]
@@ -249,15 +274,36 @@ pub struct UserAccount {
     pub usdt_balance: u64,
     pub usdc_balance: u64,
     pub open_positions: Vec<Order>,
+    pub next_order_id: u64,
 }
 
-#[account]
+#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
 pub struct Order {
+    pub id: u64,
     pub asset: Pubkey,
     pub position: PositionType,
-    pub price: u64,
+    pub order_type: OrderType,
+    pub price: Option<u64>,
+    pub amount: u64,
+    pub leverage: u64,
+    pub margin_type: MarginType,
+    pub stop_loss: Option<u64>,
+    pub take_profit: Option<u64>,
+    pub expiration_date: Option<i64>,
     pub margin_locked: u64,
     pub settled: bool,
+}
+
+#[derive(AnchorDeserialize, AnchorSerialize, PartialEq, Eq, Clone)]
+pub enum OrderType {
+    Market,
+    Limit,
+}
+
+#[derive(AnchorDeserialize, AnchorSerialize, PartialEq, Eq, Clone)]
+pub enum MarginType {
+    Cross,
+    Isolated,
 }
 
 #[derive(AnchorDeserialize, AnchorSerialize, PartialEq, Eq, Clone)]
@@ -282,13 +328,16 @@ pub enum ErrorCode {
 
     #[msg("An unexpected error occurred.")]
     UnexpectedError,
+
+    #[msg("An Order not found.")]
+    OrderNotFound,
 }
 
 #[derive(Accounts)]
-pub struct InitializeTokenAccount<'info> {
+pub struct Initialize<'info> {
     #[account(init, payer = owner, space = 8 + TokenAccount::LEN)]
     pub token_account: Account<'info, TokenAccount>,
-    #[account(address = token::ID)]
+    #[account(address = TokenID)]
     pub token_program: Program<'info, Token>,
     #[account(mut)]
     pub mint: Account<'info, Mint>,
